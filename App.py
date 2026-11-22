@@ -1,129 +1,108 @@
-import streamlit as st
-import preprocessor,helper
+from pathlib import Path
 import matplotlib.pyplot as plt
 import seaborn as sns
+import streamlit as st
 
-st.sidebar.title("Whatsapp Chat Analyzer")
+import helper
+import preprocessor
+import sentiment
 
-uploaded_file = st.sidebar.file_uploader("Choose a file")
+st.set_page_config(page_title="WhatsApp Chat & Sentiment Analyzer", layout="wide")
+st.sidebar.title("WhatsApp Chat & Sentiment Analyzer")
+
+uploaded_file = st.sidebar.file_uploader("Upload exported WhatsApp .txt file", type=["txt"])
+use_sample = st.sidebar.checkbox("Use built-in sample chat", value=uploaded_file is None)
+
+raw_data = None
 if uploaded_file is not None:
-    bytes_data = uploaded_file.getvalue()
-    data = bytes_data.decode("utf-8")
-    df = preprocessor.preprocess(data)
+    raw_data = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+elif use_sample and Path("sample_chat.txt").exists():
+    raw_data = Path("sample_chat.txt").read_text(encoding="utf-8")
 
-    st.dataframe(df)
-    # fetch unique users
-    user_list = df['user'].unique().tolist()
-    user_list.remove('group_notification')
-    user_list.sort()
-    user_list.insert(0,"Overall")
+if raw_data:
+    df = preprocessor.preprocess(raw_data)
 
-    selected_user = st.sidebar.selectbox("Show analysis wrt",user_list)
+    if df.empty:
+        st.warning("No valid WhatsApp messages were detected in the uploaded file.")
+    else:
+        user_list = [u for u in df["user"].unique().tolist() if u != "group_notification"]
+        user_list.sort()
+        user_list.insert(0, "Overall")
 
-    if st.sidebar.button("Show Analysis"):
+        selected_user = st.sidebar.selectbox("Analyze participant", user_list)
 
-        # Stats Area
-        num_messages, words, num_media_messages, num_links = helper.fetch_stats(selected_user,df)
-        st.title("Top Statistics")
-        col1, col2, col3, col4 = st.columns(4)
+        if st.sidebar.button("Run Analysis", type="primary") or use_sample:
+            num_messages, words, num_media_messages, num_links = helper.fetch_stats(selected_user, df)
 
-        with col1:
-            st.header("Total Messages")
-            st.title(num_messages)
-        with col2:
-            st.header("Total Words")
-            st.title(words)
-        with col3:
-            st.header("Media Shared")
-            st.title(num_media_messages)
-        with col4:
-            st.header("Links Shared")
-            st.title(num_links)
+            st.subheader("Conversation Overview")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total Messages", num_messages)
+            c2.metric("Total Words", words)
+            c3.metric("Media Shared", num_media_messages)
+            c4.metric("Links Shared", num_links)
 
-        # monthly timeline
-        st.title("Monthly Timeline")
-        timeline = helper.monthly_timeline(selected_user,df)
-        fig,ax = plt.subplots()
-        ax.plot(timeline['time'], timeline['message'],color='green')
-        plt.xticks(rotation='vertical')
-        st.pyplot(fig)
+            # Sentiment & Toxicity Breakdown
+            filtered_df = df if selected_user == "Overall" else df[df["user"] == selected_user]
+            sent_report = sentiment.analyze_records(filtered_df.to_dict("records"))
 
-        # daily timeline
-        st.title("Daily Timeline")
-        daily_timeline = helper.daily_timeline(selected_user, df)
-        fig, ax = plt.subplots()
-        ax.plot(daily_timeline['only_date'], daily_timeline['message'], color='black')
-        plt.xticks(rotation='vertical')
-        st.pyplot(fig)
+            st.subheader("Sentiment & Toxicity Telemetry")
+            s1, s2, s3, s4, s5 = st.columns(5)
+            s1.metric("Avg Polarity", f"{sent_report['average_score']:+.2f}")
+            s2.metric("Positive", sent_report["distribution"]["positive"])
+            s3.metric("Neutral", sent_report["distribution"]["neutral"])
+            s4.metric("Negative", sent_report["distribution"]["negative"])
+            s5.metric("Flagged Toxic", sent_report["toxic_messages"])
 
-        # activity map
-        st.title('Activity Map')
-        col1,col2 = st.columns(2)
-
-        with col1:
-            st.header("Most busy day")
-            busy_day = helper.week_activity_map(selected_user,df)
-            fig,ax = plt.subplots()
-            ax.bar(busy_day.index,busy_day.values,color='purple')
-            plt.xticks(rotation='vertical')
-            st.pyplot(fig)
-
-        with col2:
-            st.header("Most busy month")
-            busy_month = helper.month_activity_map(selected_user, df)
-            fig, ax = plt.subplots()
-            ax.bar(busy_month.index, busy_month.values,color='orange')
-            plt.xticks(rotation='vertical')
-            st.pyplot(fig)
-
-        st.title("Weekly Activity Map")
-        user_heatmap = helper.activity_heatmap(selected_user,df)
-        fig,ax = plt.subplots()
-        ax = sns.heatmap(user_heatmap)
-        st.pyplot(fig)
-
-        # finding the busiest users in the group(Group level)
-        if selected_user == 'Overall':
-            st.title('Most Busy Users')
-            x,new_df = helper.most_busy_users(df)
-            fig, ax = plt.subplots()
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                ax.bar(x.index, x.values,color='red')
-                plt.xticks(rotation='vertical')
+            col_l, col_r = st.columns(2)
+            with col_l:
+                fig, ax = plt.subplots()
+                dist = sent_report["distribution"]
+                ax.bar(dist.keys(), dist.values(), color=["#16A34A", "#64748B", "#DC2626"])
+                ax.set_title("Sentiment Distribution")
                 st.pyplot(fig)
-            with col2:
-                st.dataframe(new_df)
+            with col_r:
+                st.write("Per-Participant Sentiment Summary")
+                st.json(sent_report["by_user"])
 
-        # WordCloud
-        st.title("Wordcloud")
-        df_wc = helper.create_wordcloud(selected_user,df)
-        fig,ax = plt.subplots()
-        ax.imshow(df_wc)
-        st.pyplot(fig)
+            # Timelines
+            st.subheader("Activity Timelines")
+            t1, t2 = st.columns(2)
+            with t1:
+                timeline = helper.monthly_timeline(selected_user, df)
+                fig, ax = plt.subplots()
+                ax.plot(timeline["time"], timeline["message"], color="#15803D")
+                plt.xticks(rotation="vertical")
+                ax.set_title("Monthly Timeline")
+                st.pyplot(fig)
+            with t2:
+                daily = helper.daily_timeline(selected_user, df)
+                fig, ax = plt.subplots()
+                ax.plot(daily["only_date"], daily["message"], color="#0F172A")
+                plt.xticks(rotation="vertical")
+                ax.set_title("Daily Timeline")
+                st.pyplot(fig)
 
-        # most common words
-        most_common_df = helper.most_common_words(selected_user,df)
+            # Heatmap
+            st.subheader("Weekly Activity Heatmap")
+            user_heatmap = helper.activity_heatmap(selected_user, df)
+            if not user_heatmap.empty:
+                fig, ax = plt.subplots()
+                sns.heatmap(user_heatmap, ax=ax, cmap="YlGn")
+                st.pyplot(fig)
 
-        fig,ax = plt.subplots()
-
-        ax.barh(most_common_df[0],most_common_df[1])
-        plt.xticks(rotation='vertical')
-
-        st.title('Most commmon words')
-        st.pyplot(fig)
-
-        # emoji analysis
-        emoji_df = helper.emoji_helper(selected_user,df)
-        st.title("Emoji Analysis")
-
-        col1,col2 = st.columns(2)
-
-        with col1:
-            st.dataframe(emoji_df)
-        with col2:
-            fig,ax = plt.subplots()
-            ax.pie(emoji_df['count'].head(), labels=emoji_df['emoji'].head(), autopct="%0.2f")
-            st.pyplot(fig)
+            # Wordcloud & Common Words
+            w1, w2 = st.columns(2)
+            with w1:
+                st.subheader("Wordcloud")
+                df_wc = helper.create_wordcloud(selected_user, df)
+                fig, ax = plt.subplots()
+                ax.imshow(df_wc)
+                ax.axis("off")
+                st.pyplot(fig)
+            with w2:
+                st.subheader("Most Common Words")
+                common_df = helper.most_common_words(selected_user, df)
+                if not common_df.empty:
+                    fig, ax = plt.subplots()
+                    ax.barh(common_df[0], common_df[1], color="#15803D")
+                    st.pyplot(fig)
